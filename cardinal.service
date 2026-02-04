@@ -1,0 +1,16 @@
+[Unit]
+Description=Le Cardinal Sentinel
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/root/Le_Cardinal
+ExecStart=/usr/bin/python3 sentinel.py
+Restart=always
+# NOTE: Replace these with real values during install or via env file if needed. 
+# For now, we assume env vars or we inject them.
+# Getting them from the host env if available, or hardcoded for this specific deployment.
+# We will use the ones from the user's current context since "il a que moi qui utilise".
+
+[Install]
+WantedBy=multi-user.target
