@@ -3,15 +3,20 @@ import os
 import time
 import requests
 import psutil
+import json
+import subprocess
 from datetime import datetime
 
-# Cardinal Sentinel - Heartbeat & Monitoring Script
-# Runs on VPS to check health of itself and ChouetteVeille
+# Cardinal Assistant - Interactive Telegram Bot
+# Runs on VPS. Listens for commands via Long Polling.
 
 LOG_FILE = "sentinel.log"
 CHOUETTE_API = "http://localhost:5000/api/stats"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+ALLOWED_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+OFFSET = 0
+
+AUTH = ('hamza', 'Vincero-77') # Hardcoded for reliability in this specific deployment
 
 def log(msg):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -20,57 +25,89 @@ def log(msg):
     with open(LOG_FILE, "a") as f:
         f.write(entry + "\n")
 
-def send_alert(msg):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        log("No Telegram Token, skipping alert: " + msg)
+def send_msg(text):
+    if not TELEGRAM_TOKEN or not ALLOWED_CHAT_ID:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": f"🚨 [SENTINEL] {msg}"}
     try:
-        requests.post(url, json=payload)
+        requests.post(url, json={"chat_id": ALLOWED_CHAT_ID, "text": text})
     except Exception as e:
-        log(f"Failed to send alert: {e}")
+        log(f"Send failed: {e}")
 
-def check_chouette():
+def get_updates():
+    global OFFSET
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    params = {"offset": OFFSET, "timeout": 30}
     try:
-        # Use Basic Auth if needed, but locally localhost might be open or we use env vars
-        # For now simple check
-        r = requests.get(CHOUETTE_API, timeout=5)
+        r = requests.get(url, params=params, timeout=40)
         if r.status_code == 200:
-            return True, r.json()
-        return False, f"Status {r.status_code}"
+            data = r.json()
+            if data['ok']:
+                return data['result']
     except Exception as e:
-        return False, str(e)
+        log(f"Polling error: {e}")
+    return []
 
-def check_system():
-    cpu = psutil.cpu_percent(interval=1)
-    mem = psutil.virtual_memory().percent
-    disk = psutil.disk_usage('/').percent
-    return cpu, mem, disk
+def handle_command(cmd):
+    cmd = cmd.lower().strip()
+    
+    if cmd == "/start":
+        return "👋 Bonjour Hamza. Le Cardinal est à l'écoute.\nCommandes: /status, /scan, /logs, /sys"
+        
+    if cmd == "/status":
+        cpu = psutil.cpu_percent()
+        mem = psutil.virtual_memory().percent
+        try:
+            r = requests.get(CHOUETTE_API, auth=AUTH, timeout=5)
+            cv_status = "✅ ONLINE" if r.status_code == 200 else f"❌ ERROR {r.status_code}"
+            cv_uptime = r.json().get('uptime_days', '?') if r.status_code == 200 else "?"
+        except Exception as e:
+            cv_status = f"❌ DOWN ({str(e)})"
+            cv_uptime = "0"
+            
+        return f"📊 **Rapport Situation**\n\n🖥 **VPS**\nCPU: {cpu}%\nRAM: {mem}%\n\n🦉 **ChouetteVeille**\nEtat: {cv_status}\nUptime: {cv_uptime}j"
+
+    if cmd == "/logs":
+        try:
+            # Get last 5 lines of ChouetteVeille log (assuming location)
+            # Actually let's get sentinel log for now
+            with open(LOG_FILE, 'r') as f:
+                lines = f.readlines()[-5:]
+            return "📜 **Derniers Logs Cardinal:**\n" + "".join(lines)
+        except:
+            return "Pas de logs disponibles."
+
+    if cmd == "/sys":
+        uptime = subprocess.getoutput("uptime -p")
+        disk = subprocess.getoutput("df -h / | tail -1 | awk '{print $5}'")
+        return f"⚙️ **System Info**\n{uptime}\nDisk Usage: {disk}"
+
+    return "Commande inconnue. Essayez /status."
 
 def main():
-    log("Sentinel Started.")
-    fails = 0
+    global OFFSET
+    log("Cardinal Assistant Started.")
+    send_msg("🍷 Le Cardinal est en ligne (Mode Assistant).")
     
     while True:
-        # 1. System Health
-        cpu, mem, disk = check_system()
-        if cpu > 90 or mem > 90 or disk > 90:
-            send_alert(f"High Load! CPU: {cpu}%, RAM: {mem}%, DISK: {disk}%")
-        
-        # 2. ChouetteVeille Health
-        ok, data = check_chouette()
-        if not ok:
-            fails += 1
-            log(f"ChouetteVeille Down! ({fails}/3) - {data}")
-            if fails >= 3:
-                send_alert(f"ChouetteVeille API is DOWN after 3 attempts. Error: {data}")
-                # Optional: os.system("systemctl restart chouetteveille")
-                fails = 0 # Reset to avoid spam
-        else:
-            fails = 0
+        updates = get_updates()
+        for u in updates:
+            OFFSET = u['update_id'] + 1
+            msg = u.get('message', {})
+            chat_id = str(msg.get('chat', {}).get('id'))
+            text = msg.get('text', '')
             
-        time.sleep(60) # Constant monitoring
+            # Security Check
+            if chat_id != str(ALLOWED_CHAT_ID):
+                log(f"Unauthorized access attempt from {chat_id}")
+                continue
+                
+            if text.startswith("/"):
+                log(f"Command received: {text}")
+                response = handle_command(text)
+                send_msg(response)
+        
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()
